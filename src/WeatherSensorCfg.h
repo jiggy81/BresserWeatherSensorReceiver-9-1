@@ -91,12 +91,11 @@
 #define MAX_SENSORS_DEFAULT 1       // Maximum number of sensors to be received
 
 // List of sensor IDs to be excluded - can be empty
-#define SENSOR_IDS_EXC { 0x792882A2 }
+#define SENSOR_IDS_EXC { }
 //#define SENSOR_IDS_EXC { 0x792882A2 }
 
 // List of sensor IDs to be included - if empty, handle all available sensors
-#define SENSOR_IDS_INC { }
-//#define SENSOR_IDS_INC { 0x83750871 }
+#define SENSOR_IDS_INC { 0x00002A44 }
 
 // Maximum number of sensor IDs in include/exclude list
 #define MAX_SENSOR_IDS 12
