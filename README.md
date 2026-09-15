@@ -77,6 +77,7 @@ which buffers and combines messages from the 6-in-1 protocol until a complete se
 
 ## Contents
 
+* [Quickstart: TTGO T-Beam & Home Assistant](#quickstart-ttgo-t-beam--home-assistant-setup-platformio)
 * [Configuration](#configuration)
   * [Predefined Board Configurations](#predefined-board-configurations)
   * [User-Defined Configuration](#user-defined-configuration)
@@ -110,6 +111,54 @@ which buffers and combines messages from the 6-in-1 protocol until a complete se
 * [Software Build Tutorial](#software-build-tutorial)
 * [Source Documentation](#source-documentation)
 * [Legal](#legal)
+
+## Quickstart: TTGO T-Beam & Home Assistant Setup (PlatformIO)
+
+This repository includes a ready-to-use PlatformIO setup for the **LilyGO TTGO T-Beam (ESP32 + SX1262 @ 868 MHz)** to receive and decode weather data from the **Bresser 9-in-1 Weather Station** and provide it to Home Assistant via MQTT Discovery.
+
+### Configuration Template (`secrets.h.example`)
+
+Network and MQTT credentials must be placed in `src/secrets.h`. A template file [`src/secrets.h.example`](src/secrets.h.example) is provided.
+
+1. **Copy the template file to `src/secrets.h`**:
+   - **Windows (PowerShell):**
+     ```powershell
+     Copy-Item src/secrets.h.example src/secrets.h
+     ```
+   - **Linux / macOS:**
+     ```bash
+     cp src/secrets.h.example src/secrets.h
+     ```
+
+2. **Configure your credentials in `src/secrets.h`**:
+   ```cpp
+   // WLAN Zugangsdaten
+   #define WIFI_SSID     "DEIN_WLAN_NAME"
+   #define WIFI_PASS     "DEIN_WLAN_PASSWORT"
+
+   // Home Assistant Mosquitto MQTT Broker
+   #define MQTT_HOST     "192.168.1.100"
+   #define MQTT_PORT     1883
+   #define MQTT_USER     "dein_mqtt_benutzer"
+   #define MQTT_PASS     "dein_mqtt_passwort"
+   ```
+
+   > [!NOTE]
+   > `src/secrets.h` is excluded from git tracking via `.gitignore` to prevent committing sensitive network passwords or tokens.
+
+3. **Build & Flash the Board**:
+   - Using PlatformIO CLI:
+     ```powershell
+     pio run -t upload
+     ```
+   - Or in VS Code: Click the PlatformIO **Upload** icon.
+
+4. **Home Assistant Integration**:
+   - When powered on, the T-Beam activates the SX1262 LoRa module via its on-board PMU (AXP2101 / AXP192) and publishes MQTT Discovery topics.
+   - **MQTT Base Topic:** `homeassistant/sensor/bresser_weatherstation_9in1`
+     - Telemetry state topic: `homeassistant/sensor/bresser_weatherstation_9in1/state`
+     - Discovery config topic: `homeassistant/sensor/bresser_weatherstation_9in1/<sensor_id>/config`
+   - All 9-in-1 sensor values (temperature, humidity, wind speed, gust, direction, rain, lux, UV, dew point, battery, RSSI) are automatically grouped under the device **"Bresser Weather Station"** in **Settings > Devices & Services > MQTT**.
 
 ## Configuration
 

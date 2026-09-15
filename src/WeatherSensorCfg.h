@@ -242,6 +242,14 @@
     #define PIN_RECEIVER_GPIO LORA_D1
     #define PIN_RECEIVER_RST  LORA_RST
 
+#elif defined(LILYGO_T_BEAM_V1_2) || defined(ARDUINO_T_BEAM) || defined(ARDUINO_TTGO_T_BEAM)
+    #pragma message("LILYGO_T_BEAM_V1_2 defined; using on-board transceiver SX1262")
+    #define USE_SX1262
+    #define PIN_RECEIVER_CS   18
+    #define PIN_RECEIVER_IRQ  33
+    #define PIN_RECEIVER_GPIO 32
+    #define PIN_RECEIVER_RST  23
+
 #elif defined(ARDUINO_LILYGO_T3S3_SX1262)
     // https://github.com/espressif/arduino-esp32/blob/master/variants/lilygo_t3_s3_sx1262/pins_arduino.h
     #pragma message("ARDUINO_LILYGO_T3S3_SX1262 defined; using on-board transceiver")
