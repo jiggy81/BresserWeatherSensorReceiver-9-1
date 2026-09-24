@@ -158,7 +158,7 @@ Network and MQTT credentials must be placed in `src/secrets.h`. A template file 
    - **MQTT Base Topic:** `homeassistant/sensor/bresser_weatherstation_9in1`
      - Telemetry state topic: `homeassistant/sensor/bresser_weatherstation_9in1/state`
      - Discovery config topic: `homeassistant/sensor/bresser_weatherstation_9in1/<sensor_id>/config`
-   - All 9-in-1 sensor values (temperature, humidity, wind speed, gust, direction, rain, lux, UV, dew point, battery, RSSI) are automatically grouped under the device **"Bresser Weather Station"** in **Settings > Devices & Services > MQTT**.
+   - All 9-in-1 sensor values (temperature, humidity, wind speed, gust, direction, rain, lux, UV, dew point, battery, battery receiver, RSSI) are automatically grouped under the device **"Bresser Weather Station"** in **Settings > Devices & Services > MQTT**.
 
 ## Configuration
 

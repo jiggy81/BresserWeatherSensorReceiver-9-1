@@ -22,6 +22,9 @@ const char* MQTT_BASE_TOPIC = "homeassistant/sensor/bresser_weatherstation_9in1"
 unsigned long lastDiscoveryTime = 0;
 const unsigned long DISCOVERY_INTERVAL = 300000; // Refresh discovery every 5 minutes
 
+enum PmuType { PMU_TYPE_NONE, PMU_TYPE_AXP192, PMU_TYPE_AXP2101 };
+PmuType detectedPMU = PMU_TYPE_NONE;
+
 // --- 1. AXP2101 / AXP192 Power Management: Enable power for SX1262 LoRa ---
 bool initPMU() {
     Wire.begin(21, 22);
@@ -32,6 +35,7 @@ bool initPMU() {
         PMU_2101.setALDO2Voltage(3300);
         PMU_2101.enableALDO2();
         log_i("ALDO2 (SX1262 LoRa 3.3V) enabled.");
+        detectedPMU = PMU_TYPE_AXP2101;
         return true;
     }
     
@@ -41,11 +45,28 @@ bool initPMU() {
         PMU_192.setLDO2Voltage(3300);
         PMU_192.enableLDO2();
         log_i("LDO2 (LoRa 3.3V) enabled.");
+        detectedPMU = PMU_TYPE_AXP192;
         return true;
     }
 
     log_e("No AXP PMU detected!");
     return false;
+}
+
+int getReceiverBatteryPercent() {
+    if (detectedPMU == PMU_TYPE_AXP2101) {
+        return PMU_2101.getBatteryPercent();
+    } else if (detectedPMU == PMU_TYPE_AXP192) {
+        return PMU_192.getBatteryPercent();
+    } else {
+        // Fallback for TTGO LoRa32 and boards without PMU:
+        // Battery voltage divider (100k / 100k) connected to GPIO 35
+        uint32_t mv = analogReadMilliVolts(35);
+        float vbat = (mv * 2.0f) / 1000.0f;
+        if (vbat <= 3.3f) return 0;
+        if (vbat >= 4.2f) return 100;
+        return (int)((vbat - 3.3f) / (4.2f - 3.3f) * 100.0f);
+    }
 }
 
 // --- 2. Home Assistant MQTT Auto-Discovery ---
@@ -105,6 +126,7 @@ void sendHomeAssistantDiscovery() {
     publishDiscoverySensor("uv", "UV Index", nullptr, nullptr, "uv", "measurement");
     publishDiscoverySensor("dewpoint", "Dew Point", "temperature", "°C", "dewpoint", "measurement");
     publishDiscoverySensor("battery", "Battery", "battery", "%", "battery");
+    publishDiscoverySensor("battery_receiver", "Battery Receiver", "battery", "%", "battery_receiver");
     publishDiscoverySensor("rssi", "Signal Strength", "signal_strength", "dBm", "rssi", "measurement");
 }
 
@@ -196,6 +218,13 @@ void loop() {
             stateDoc["sensor_id"] = s.sensor_id;
             stateDoc["rssi"] = s.rssi;
             stateDoc["battery"] = s.battery_ok ? 100 : 10;
+
+            int rxBat = getReceiverBatteryPercent();
+            if (rxBat >= 0) {
+                stateDoc["battery_receiver"] = rxBat;
+            } else {
+                stateDoc["battery_receiver"] = nullptr;
+            }
 
             if (s.w.temp_ok) stateDoc["temperature"] = s.w.temp_c;
             if (s.w.humidity_ok) stateDoc["humidity"] = s.w.humidity;
