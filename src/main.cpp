@@ -1,4 +1,4 @@
-﻿#include <Arduino.h>
+#include <Arduino.h>
 #include <WiFi.h>
 #include <MQTT.h>
 #include <ArduinoJson.h>
@@ -18,6 +18,7 @@ WiFiClient net;
 MQTTClient mqttClient(1024);
 
 const char* MQTT_BASE_TOPIC = "homeassistant/sensor/bresser_weatherstation_9in1";
+const char* MQTT_RECEIVER_BASE_TOPIC = "homeassistant/sensor/bresser_receiver";
 
 unsigned long lastDiscoveryTime = 0;
 const unsigned long DISCOVERY_INTERVAL = 300000; // Refresh discovery every 5 minutes
@@ -25,7 +26,7 @@ const unsigned long DISCOVERY_INTERVAL = 300000; // Refresh discovery every 5 mi
 enum PmuType { PMU_TYPE_NONE, PMU_TYPE_AXP192, PMU_TYPE_AXP2101 };
 PmuType detectedPMU = PMU_TYPE_NONE;
 
-// --- 1. AXP2101 / AXP192 Power Management: Enable power for SX1262 LoRa ---
+// --- 1. AXP2101 / AXP192 Power Management: Enable power & charging ---
 bool initPMU() {
     Wire.begin(21, 22);
     
@@ -35,6 +36,15 @@ bool initPMU() {
         PMU_2101.setALDO2Voltage(3300);
         PMU_2101.enableALDO2();
         log_i("ALDO2 (SX1262 LoRa 3.3V) enabled.");
+
+        // 1. Akku-Ladefunktion aktivieren (18650 Li-Ion: 4.2V, 500mA Ladestrom)
+        PMU_2101.enableCellbatteryCharge();
+        PMU_2101.setChargeTargetVoltage(XPOWERS_AXP2101_CHG_VOL_4V2);
+        PMU_2101.setChargerConstantCurr(XPOWERS_AXP2101_CHG_CUR_500MA);
+
+        // 2. Hardware-Lade-LED am Board aktivieren (leuchtet beim Laden, erlischt wenn voll)
+        PMU_2101.setChargingLedMode(XPOWERS_CHG_LED_CTRL_CHG);
+
         detectedPMU = PMU_TYPE_AXP2101;
         return true;
     }
@@ -45,6 +55,12 @@ bool initPMU() {
         PMU_192.setLDO2Voltage(3300);
         PMU_192.enableLDO2();
         log_i("LDO2 (LoRa 3.3V) enabled.");
+
+        PMU_192.enableCharge();
+        PMU_192.setChargeTargetVoltage(XPOWERS_AXP192_CHG_VOL_4V2);
+        PMU_192.setChargerConstantCurr(XPOWERS_AXP192_CHG_CUR_780MA);
+        PMU_192.setChargingLedMode(XPOWERS_CHG_LED_CTRL_CHG);
+
         detectedPMU = PMU_TYPE_AXP192;
         return true;
     }
@@ -59,8 +75,6 @@ int getReceiverBatteryPercent() {
     } else if (detectedPMU == PMU_TYPE_AXP192) {
         return PMU_192.getBatteryPercent();
     } else {
-        // Fallback for TTGO LoRa32 and boards without PMU:
-        // Battery voltage divider (100k / 100k) connected to GPIO 35
         uint32_t mv = analogReadMilliVolts(35);
         float vbat = (mv * 2.0f) / 1000.0f;
         if (vbat <= 3.3f) return 0;
@@ -69,10 +83,56 @@ int getReceiverBatteryPercent() {
     }
 }
 
+float getReceiverBatteryVoltage() {
+    if (detectedPMU == PMU_TYPE_AXP2101) {
+        return PMU_2101.getBattVoltage() / 1000.0f;
+    } else if (detectedPMU == PMU_TYPE_AXP192) {
+        return PMU_192.getBattVoltage() / 1000.0f;
+    } else {
+        uint32_t mv = analogReadMilliVolts(35);
+        return (mv * 2.0f) / 1000.0f;
+    }
+}
+
+bool isReceiverCharging() {
+    if (detectedPMU == PMU_TYPE_AXP2101) {
+        return PMU_2101.isCharging();
+    } else if (detectedPMU == PMU_TYPE_AXP192) {
+        return PMU_192.isCharging();
+    }
+    return false;
+}
+
+bool isReceiverUsbPower() {
+    if (detectedPMU == PMU_TYPE_AXP2101) {
+        return PMU_2101.isVbusIn();
+    } else if (detectedPMU == PMU_TYPE_AXP192) {
+        return PMU_192.isVbusIn();
+    }
+    return false;
+}
+
+const char* getReceiverChargerStatus() {
+    if (detectedPMU == PMU_TYPE_AXP2101) {
+        if (!PMU_2101.isBatteryConnect()) return "No Battery";
+        xpowers_chg_status_t st = PMU_2101.getChargerStatus();
+        switch (st) {
+            case XPOWERS_AXP2101_CHG_TRI_STATE: return "Tri-Charge";
+            case XPOWERS_AXP2101_CHG_PRE_STATE: return "Pre-Charge";
+            case XPOWERS_AXP2101_CHG_CC_STATE:  return "Constant Current";
+            case XPOWERS_AXP2101_CHG_CV_STATE:  return "Constant Voltage";
+            case XPOWERS_AXP2101_CHG_DONE_STATE: return "Fully Charged";
+            case XPOWERS_AXP2101_CHG_STOP_STATE:
+            default:
+                return PMU_2101.isVbusIn() ? "Standby" : "Discharging";
+        }
+    }
+    return "Unknown";
+}
+
 // --- 2. Home Assistant MQTT Auto-Discovery ---
-void publishDiscoverySensor(const char* id, const char* name, const char* dev_cla, 
-                            const char* unit, const char* val_field, const char* state_class = nullptr,
-                            bool is_receiver = false) {
+void publishWeatherDiscoverySensor(const char* id, const char* name, const char* dev_cla, 
+                                   const char* unit, const char* val_field, const char* state_class = nullptr) {
     JsonDocument doc;
     char unique_id[64];
     snprintf(unique_id, sizeof(unique_id), "bresser_9in1_%s", id);
@@ -92,53 +152,158 @@ void publishDiscoverySensor(const char* id, const char* name, const char* dev_cl
     if (unit) doc["unit_of_measurement"] = unit;
     if (state_class) doc["state_class"] = state_class;
 
-    // Device block: Separate device for the receiver vs the outdoor weather station
     JsonObject dev = doc["device"].to<JsonObject>();
     JsonArray id_arr = dev["identifiers"].to<JsonArray>();
-    if (is_receiver) {
-        id_arr.add("bresser_receiver_ttgo");
-        dev["name"] = "Wetterstation Receiver";
-        dev["model"] = "LilyGO T-Beam Receiver";
-        dev["manufacturer"] = "LilyGO";
-    } else {
-        id_arr.add("bresser_9in1_7803520");
-        dev["name"] = "Wetterstation";
-        dev["model"] = "7803520 9-in-1 Solar";
-        dev["manufacturer"] = "Bresser";
-    }
+    id_arr.add("bresser_9in1_7803520");
+    dev["name"] = "Wetterstation";
+    dev["model"] = "7803520 9-in-1 Solar";
+    dev["manufacturer"] = "Bresser";
 
     char discTopic[128];
     snprintf(discTopic, sizeof(discTopic), "%s/%s/config", MQTT_BASE_TOPIC, id);
 
     String payload;
     serializeJson(doc, payload);
-    bool ok = mqttClient.publish(discTopic, payload, true, 0); // Retained
-    if (ok) {
-        Serial.printf("[MQTT] Discovery OK: %s\n", discTopic);
-    } else {
-        Serial.printf("[MQTT] Discovery FAILED: %s (Error: %d)\n", discTopic, mqttClient.lastError());
-    }
+    mqttClient.publish(discTopic, payload, true, 0); // Retained
+    delay(15);
+    mqttClient.loop();
+}
+
+void publishReceiverDiscoverySensor(const char* id, const char* name, const char* dev_cla,
+                                    const char* unit, const char* val_field, const char* state_class = nullptr,
+                                    const char* icon = nullptr) {
+    JsonDocument doc;
+    char unique_id[64];
+    snprintf(unique_id, sizeof(unique_id), "bresser_receiver_%s", id);
+
+    char state_topic[128];
+    snprintf(state_topic, sizeof(state_topic), "%s/state", MQTT_RECEIVER_BASE_TOPIC);
+
+    doc["name"] = name;
+    doc["unique_id"] = unique_id;
+    doc["state_topic"] = state_topic;
+    
+    char val_tmpl[64];
+    snprintf(val_tmpl, sizeof(val_tmpl), "{{ value_json.%s }}", val_field);
+    doc["value_template"] = val_tmpl;
+
+    if (dev_cla) doc["device_class"] = dev_cla;
+    if (unit) doc["unit_of_measurement"] = unit;
+    if (state_class) doc["state_class"] = state_class;
+    if (icon) doc["icon"] = icon;
+
+    JsonObject dev = doc["device"].to<JsonObject>();
+    JsonArray id_arr = dev["identifiers"].to<JsonArray>();
+    id_arr.add("bresser_receiver_ttgo");
+    dev["name"] = "Wetterstation Receiver";
+    dev["model"] = "LilyGO T-Beam Receiver";
+    dev["manufacturer"] = "LilyGO";
+
+    char discTopic[128];
+    snprintf(discTopic, sizeof(discTopic), "homeassistant/sensor/bresser_receiver/%s/config", id);
+
+    String payload;
+    serializeJson(doc, payload);
+    mqttClient.publish(discTopic, payload, true, 0); // Retained
+    delay(15);
+    mqttClient.loop();
+}
+
+void publishReceiverDiscoveryBinarySensor(const char* id, const char* name, const char* dev_cla,
+                                          const char* val_field) {
+    JsonDocument doc;
+    char unique_id[64];
+    snprintf(unique_id, sizeof(unique_id), "bresser_receiver_%s", id);
+
+    char state_topic[128];
+    snprintf(state_topic, sizeof(state_topic), "%s/state", MQTT_RECEIVER_BASE_TOPIC);
+
+    doc["name"] = name;
+    doc["unique_id"] = unique_id;
+    doc["state_topic"] = state_topic;
+    
+    char val_tmpl[64];
+    snprintf(val_tmpl, sizeof(val_tmpl), "{{ 'ON' if value_json.%s else 'OFF' }}", val_field);
+    doc["value_template"] = val_tmpl;
+
+    if (dev_cla) doc["device_class"] = dev_cla;
+
+    JsonObject dev = doc["device"].to<JsonObject>();
+    JsonArray id_arr = dev["identifiers"].to<JsonArray>();
+    id_arr.add("bresser_receiver_ttgo");
+    dev["name"] = "Wetterstation Receiver";
+    dev["model"] = "LilyGO T-Beam Receiver";
+    dev["manufacturer"] = "LilyGO";
+
+    char discTopic[128];
+    snprintf(discTopic, sizeof(discTopic), "homeassistant/binary_sensor/bresser_receiver/%s/config", id);
+
+    String payload;
+    serializeJson(doc, payload);
+    mqttClient.publish(discTopic, payload, true, 0); // Retained
     delay(15);
     mqttClient.loop();
 }
 
 void sendHomeAssistantDiscovery() {
     log_i("Publishing Home Assistant MQTT discovery configurations...");
-    publishDiscoverySensor("temperature", "Temperature", "temperature", "°C", "temperature", "measurement");
-    publishDiscoverySensor("humidity", "Humidity", "humidity", "%", "humidity", "measurement");
-    publishDiscoverySensor("wind_speed", "Wind Speed", "wind_speed", "m/s", "wind_speed", "measurement");
-    publishDiscoverySensor("wind_gust", "Wind Gust", "wind_speed", "m/s", "wind_gust", "measurement");
-    publishDiscoverySensor("wind_direction", "Wind Direction", "wind_direction", "°", "wind_direction");
-    publishDiscoverySensor("rain", "Total Rain", "precipitation", "mm", "rain", "total_increasing");
-    publishDiscoverySensor("light_lux", "Illuminance", "illuminance", "lx", "light_lux", "measurement");
-    publishDiscoverySensor("uv", "UV Index", nullptr, nullptr, "uv", "measurement");
-    publishDiscoverySensor("dewpoint", "Dew Point", "temperature", "°C", "dewpoint", "measurement");
-    publishDiscoverySensor("battery", "Battery", "battery", "%", "battery");
-    publishDiscoverySensor("battery_receiver", "Battery Receiver", "battery", "%", "battery_receiver", nullptr, true);
-    publishDiscoverySensor("rssi", "Signal Strength", "signal_strength", "dBm", "rssi", "measurement");
+
+    // 1. Weather Station Sensors
+    publishWeatherDiscoverySensor("temperature", "Temperature", "temperature", "°C", "temperature", "measurement");
+    publishWeatherDiscoverySensor("humidity", "Humidity", "humidity", "%", "humidity", "measurement");
+    publishWeatherDiscoverySensor("wind_speed", "Wind Speed", "wind_speed", "m/s", "wind_speed", "measurement");
+    publishWeatherDiscoverySensor("wind_gust", "Wind Gust", "wind_speed", "m/s", "wind_gust", "measurement");
+    publishWeatherDiscoverySensor("wind_direction", "Wind Direction", "wind_direction", "°", "wind_direction");
+    publishWeatherDiscoverySensor("rain", "Total Rain", "precipitation", "mm", "rain", "total_increasing");
+    publishWeatherDiscoverySensor("light_lux", "Illuminance", "illuminance", "lx", "light_lux", "measurement");
+    publishWeatherDiscoverySensor("uv", "UV Index", nullptr, nullptr, "uv", "measurement");
+    publishWeatherDiscoverySensor("dewpoint", "Dew Point", "temperature", "°C", "dewpoint", "measurement");
+    publishWeatherDiscoverySensor("battery", "Battery", "battery", "%", "battery");
+    publishWeatherDiscoverySensor("rssi", "Signal Strength", "signal_strength", "dBm", "rssi", "measurement");
+
+    // Clean up old orphaned battery_receiver config under weather station topic if any
+    mqttClient.publish("homeassistant/sensor/bresser_weatherstation_9in1/battery_receiver/config", "", true, 0);
+
+    // 2. Wetterstation Receiver Device Sensors & Binary Sensors
+    publishReceiverDiscoverySensor("battery", "Battery", "battery", "%", "battery", "measurement");
+    publishReceiverDiscoveryBinarySensor("charging", "Charging", "battery_charging", "charging");
+    publishReceiverDiscoveryBinarySensor("usb_power", "USB Power", "power", "usb_power");
+    publishReceiverDiscoverySensor("voltage", "Battery Voltage", "voltage", "V", "voltage", "measurement");
+    publishReceiverDiscoverySensor("charger_status", "Charger Status", nullptr, nullptr, "charger_status", nullptr, "mdi:battery-sync");
+    publishReceiverDiscoverySensor("wifi_signal", "WiFi Signal", "signal_strength", "dBm", "wifi_rssi", "measurement");
 }
 
-// --- 3. WiFi and MQTT Connection Handling ---
+// --- 3. Telemetry Publishing ---
+void publishReceiverTelemetry() {
+    if (!mqttClient.connected()) return;
+
+    JsonDocument doc;
+    int bat = getReceiverBatteryPercent();
+    if (bat >= 0) {
+        doc["battery"] = bat;
+    } else {
+        doc["battery"] = nullptr;
+    }
+
+    doc["voltage"] = serialized(String(getReceiverBatteryVoltage(), 2));
+    doc["charging"] = isReceiverCharging();
+    doc["usb_power"] = isReceiverUsbPower();
+    doc["charger_status"] = getReceiverChargerStatus();
+    doc["wifi_rssi"] = WiFi.RSSI();
+
+    String payload;
+    serializeJson(doc, payload);
+    char topic[128];
+    snprintf(topic, sizeof(topic), "%s/state", MQTT_RECEIVER_BASE_TOPIC);
+    bool ok = mqttClient.publish(topic, payload, false, 0);
+    if (ok) {
+        Serial.printf("[MQTT] Receiver Telemetry: %s\n", payload.c_str());
+    } else {
+        Serial.printf("[MQTT] Receiver Telemetry FAILED (Error: %d)\n", mqttClient.lastError());
+    }
+}
+
+// --- 4. WiFi and MQTT Connection Handling ---
 void connectWiFiAndMQTT() {
     if (WiFi.status() != WL_CONNECTED) {
         Serial.print("Connecting to WiFi...");
@@ -163,6 +328,7 @@ void connectWiFiAndMQTT() {
             Serial.println("\nMQTT connected!");
             sendHomeAssistantDiscovery();
             lastDiscoveryTime = millis();
+            publishReceiverTelemetry();
         } else {
             Serial.println("\nMQTT connection failed.");
         }
@@ -174,9 +340,14 @@ void setup() {
     delay(1000);
     Serial.println("\n=== Bresser 9-in-1 Weatherstation Receiver Started ===");
 
-    // 1. Initialize PMU (Enable power supply rail for SX1262 LoRa module)
+    // 1. Initialize PMU (Enable SX1262 LoRa power, battery charging & charge LED)
     if (!initPMU()) {
         Serial.println("Warning: PMU initialization failed!");
+    } else {
+        Serial.printf("[PMU] VBUS connected: %s\n", isReceiverUsbPower() ? "YES" : "NO");
+        Serial.printf("[PMU] Battery Voltage: %.2f V\n", getReceiverBatteryVoltage());
+        Serial.printf("[PMU] Battery Percent: %d %%\n", getReceiverBatteryPercent());
+        Serial.printf("[PMU] Charging: %s (%s)\n", isReceiverCharging() ? "YES" : "NO", getReceiverChargerStatus());
     }
 
     // 2. Initialize RadioLib / SX1262 transceiver
@@ -210,6 +381,18 @@ void loop() {
             sendHomeAssistantDiscovery();
         }
         lastDiscoveryTime = millis();
+    }
+
+    // Periodically publish receiver telemetry (every 30 seconds or on USB power change)
+    static unsigned long lastReceiverTelemetry = 0;
+    static bool lastUsbState = false;
+    bool currentUsb = isReceiverUsbPower();
+    if (millis() - lastReceiverTelemetry > 30000 || currentUsb != lastUsbState) {
+        if (mqttClient.connected()) {
+            publishReceiverTelemetry();
+        }
+        lastReceiverTelemetry = millis();
+        lastUsbState = currentUsb;
     }
 
     // 4. Receive and decode weather sensor radio packets (100 ms timeout for reactive loop)
