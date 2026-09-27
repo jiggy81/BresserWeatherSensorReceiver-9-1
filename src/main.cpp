@@ -1,5 +1,6 @@
 #include <Arduino.h>
 #include <WiFi.h>
+#include <ArduinoOTA.h>
 #include <MQTT.h>
 #include <ArduinoJson.h>
 #include <Wire.h>
@@ -35,7 +36,12 @@ bool initPMU() {
         log_i("AXP2101 PMU detected.");
         PMU_2101.setALDO2Voltage(3300);
         PMU_2101.enableALDO2();
-        log_i("ALDO2 (SX1262 LoRa 3.3V) enabled.");
+        log_i("ALDO2 enabled.");
+
+        // SX1262 LoRa transceiver power rail on LilyGO T-Beam V1.2 is ALDO3
+        PMU_2101.setALDO3Voltage(3300);
+        PMU_2101.enableALDO3();
+        log_i("ALDO3 (SX1262 LoRa 3.3V) enabled.");
 
         // 1. Akku-Ladefunktion aktivieren (18650 Li-Ion: 4.2V, 500mA Ladestrom)
         PMU_2101.enableCellbatteryCharge();
@@ -362,9 +368,15 @@ void setup() {
     // 3. Prepare MQTT client
     mqttClient.begin(MQTT_HOST, MQTT_PORT, net);
     connectWiFiAndMQTT();
+
+    // 4. ArduinoOTA for wireless updates
+    ArduinoOTA.setHostname("bresser-receiver");
+    ArduinoOTA.begin();
+    Serial.println("ArduinoOTA ready for wireless updates.");
 }
 
 void loop() {
+    ArduinoOTA.handle();
     // Check WiFi and MQTT connections
     if (WiFi.status() != WL_CONNECTED || !mqttClient.connected()) {
         static unsigned long lastReconnectAttempt = 0;
@@ -396,7 +408,7 @@ void loop() {
     }
 
     // 4. Receive and decode weather sensor radio packets (100 ms timeout for reactive loop)
-    int decode_status = weatherSensor.getData(100, DATA_COMPLETE);
+    int decode_status = weatherSensor.getData(1000, DATA_COMPLETE);
 
     if (decode_status == DECODE_OK) {
         for (size_t i = 0; i < weatherSensor.sensor.size(); i++) {
@@ -438,7 +450,7 @@ void loop() {
                 serializeJson(stateDoc, jsonPayload);
                 char stateTopic[128];
                 snprintf(stateTopic, sizeof(stateTopic), "%s/state", MQTT_BASE_TOPIC);
-                bool ok = mqttClient.publish(stateTopic, jsonPayload, false, 0);
+                bool ok = mqttClient.publish(stateTopic, jsonPayload, true, 0);
                 if (ok) {
                     Serial.printf("[MQTT] Published to %s: %s\n", stateTopic, jsonPayload.c_str());
                 } else {
@@ -448,5 +460,6 @@ void loop() {
                 Serial.println("[MQTT] Not connected! Cannot publish state.");
             }
         }
+        weatherSensor.clearSlots();
     }
 }
