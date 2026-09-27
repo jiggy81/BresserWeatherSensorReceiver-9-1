@@ -1,4 +1,4 @@
-#include <Arduino.h>
+﻿#include <Arduino.h>
 #include <WiFi.h>
 #include <MQTT.h>
 #include <ArduinoJson.h>
@@ -71,7 +71,8 @@ int getReceiverBatteryPercent() {
 
 // --- 2. Home Assistant MQTT Auto-Discovery ---
 void publishDiscoverySensor(const char* id, const char* name, const char* dev_cla, 
-                            const char* unit, const char* val_field, const char* state_class = nullptr) {
+                            const char* unit, const char* val_field, const char* state_class = nullptr,
+                            bool is_receiver = false) {
     JsonDocument doc;
     char unique_id[64];
     snprintf(unique_id, sizeof(unique_id), "bresser_9in1_%s", id);
@@ -91,13 +92,20 @@ void publishDiscoverySensor(const char* id, const char* name, const char* dev_cl
     if (unit) doc["unit_of_measurement"] = unit;
     if (state_class) doc["state_class"] = state_class;
 
-    // Device block: Groups all sensors under one device in Home Assistant
+    // Device block: Separate device for the receiver vs the outdoor weather station
     JsonObject dev = doc["device"].to<JsonObject>();
     JsonArray id_arr = dev["identifiers"].to<JsonArray>();
-    id_arr.add("bresser_9in1_7803520");
-    dev["name"] = "Bresser Weather Station";
-    dev["model"] = "7803520 9-in-1 Solar";
-    dev["manufacturer"] = "Bresser";
+    if (is_receiver) {
+        id_arr.add("bresser_receiver_ttgo");
+        dev["name"] = "Wetterstation Receiver";
+        dev["model"] = "LilyGO T-Beam Receiver";
+        dev["manufacturer"] = "LilyGO";
+    } else {
+        id_arr.add("bresser_9in1_7803520");
+        dev["name"] = "Wetterstation";
+        dev["model"] = "7803520 9-in-1 Solar";
+        dev["manufacturer"] = "Bresser";
+    }
 
     char discTopic[128];
     snprintf(discTopic, sizeof(discTopic), "%s/%s/config", MQTT_BASE_TOPIC, id);
@@ -126,7 +134,7 @@ void sendHomeAssistantDiscovery() {
     publishDiscoverySensor("uv", "UV Index", nullptr, nullptr, "uv", "measurement");
     publishDiscoverySensor("dewpoint", "Dew Point", "temperature", "°C", "dewpoint", "measurement");
     publishDiscoverySensor("battery", "Battery", "battery", "%", "battery");
-    publishDiscoverySensor("battery_receiver", "Battery Receiver", "battery", "%", "battery_receiver");
+    publishDiscoverySensor("battery_receiver", "Battery Receiver", "battery", "%", "battery_receiver", nullptr, true);
     publishDiscoverySensor("rssi", "Signal Strength", "signal_strength", "dBm", "rssi", "measurement");
 }
 
